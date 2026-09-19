@@ -1,0 +1,45 @@
+# Stateful infrastructure only. The API and the Next.js dev server run on the
+# host so that reloads stay fast and debugging is direct; there is no benefit to
+# containerising a process you are editing every thirty seconds.
+#
+# Ports are deliberately non-default (5434 / 6380) so this stack can run
+# alongside any other Postgres or Redis already listening locally.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: syncboard-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-syncboard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-syncboard}
+      POSTGRES_DB: ${POSTGRES_DB:-syncboard}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - syncboard-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Guards `docker compose up --wait` so migrations never run against a
+      # server that has not finished initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-syncboard} -d ${POSTGRES_DB:-syncboard}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: syncboard-redis
+    restart: unless-stopped
+    # Realtime fan-out and presence are both ephemeral by design, so there is
+    # nothing here worth persisting to disk. Disabling RDB snapshots keeps that
+    # explicit rather than accidental.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  syncboard-postgres-data:

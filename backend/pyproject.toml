@@ -1,0 +1,62 @@
+[project]
+name = "syncboard-backend"
+version = "0.1.0"
+description = "SyncBoard API - realtime collaborative board workspace"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy>=2.0.36",
+    # psycopg 3 serves both the async app engine and the sync Alembic engine
+    # from one driver name (postgresql+psycopg://).
+    "psycopg[binary]>=3.2",
+    "alembic>=1.14",
+    # Milestone 2 pub/sub fan-out; Milestone 1 uses it only for the health probe.
+    "redis>=5.2",
+    # Signs the guest session cookie.
+    "itsdangerous>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+# Alembic's generated env/versions are script-style and not worth strict typing.
+exclude = "^alembic/"
+
+# itsdangerous ships no type stubs.
+[[tool.mypy.overrides]]
+module = "itsdangerous.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

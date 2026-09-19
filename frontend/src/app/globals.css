@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+/*
+ * SyncBoard design tokens.
+ *
+ * Taken from HUM's own stylesheet (priyanshughosh.in/design) rather than
+ * inferred from screenshots — the values, the type stack, the easings and the
+ * "milled, not moulded" radii are that system's, adopted wholesale so the two
+ * surfaces read as the same hand.
+ *
+ * The earlier pass guessed warm-paper-and-ink correctly and got the specifics
+ * wrong: two earthy accents where HUM has exactly one highlighter, and a serif
+ * display where HUM sets a grotesque. Those are corrected here.
+ *
+ * LIGHT ONLY for now. Everything is a custom property, so a dark variant is a
+ * token swap under `:root[data-theme="dark"]` and touches no component.
+ */
+@theme {
+  /* ---- MATERIAL ---------------------------------------------------- */
+  --color-paper: #f1eee5; /* the ground */
+  --color-paper-up: #fbfaf6; /* a sheet on it */
+  --color-paper-deep: #e2ddcf; /* a recess, a rule, a shade */
+  --color-ink: #15150f; /* near-black, warm */
+  --color-ink-2: #2a2922;
+  --color-ink-soft: #55534a; /* body copy on paper */
+  --color-ink-faint: #6e6b5d; /* metadata — dark enough for small tracked type */
+
+  --color-hair: rgba(21, 21, 15, 0.16);
+  --color-hair-soft: rgba(21, 21, 15, 0.08);
+  --color-hair-strong: rgba(21, 21, 15, 0.28);
+
+  /* One accent. A highlighter: it fills, and ink sits on top of it. */
+  --color-accent: #cbf03c;
+  --color-accent-deep: #b3d621;
+  --color-accent-wash: rgba(203, 240, 60, 0.28);
+
+  --color-danger: #a3372c;
+  --color-danger-soft: #ecd3ce;
+
+  /* ---- DEPTH ------------------------------------------------------- */
+  --shadow-card: 0 1px 1px rgba(21, 21, 15, 0.04), 0 6px 16px -8px rgba(21, 21, 15, 0.14);
+  --shadow-held: 0 2px 4px rgba(21, 21, 15, 0.06), 0 22px 44px -14px rgba(21, 21, 15, 0.26);
+  --shadow-nav: 0 1px 0 rgba(21, 21, 15, 0.08), 0 12px 30px -22px rgba(21, 21, 15, 0.4);
+
+  /* ---- TYPE -------------------------------------------------------- */
+  --font-display: var(--font-bricolage), "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-sans: var(--font-instrument-sans), "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-dm-mono), ui-monospace, "SF Mono", Consolas, monospace;
+
+  --text-micro: 0.625rem;
+  --text-nano: 0.5625rem;
+
+  /* ---- SHAPE ------------------------------------------------------- */
+  --radius-xs: 2px;
+  --radius: 3px; /* milled, not moulded */
+  --radius-lg: 6px;
+
+  /* ---- MOTION ------------------------------------------------------ */
+  --ease-rise: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-snap: cubic-bezier(0.7, 0, 0.28, 1);
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 400ms;
+}
+
+html {
+  color-scheme: light;
+  /* The canvas owns wheel and gesture handling; the page itself never scrolls. */
+  overscroll-behavior: none;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01" 1;
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+::selection {
+  background-color: var(--color-accent-wash);
+  color: var(--color-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/*
+ * THE SUBSTRATE — grain and dot field in ONE fixed layer rather than two.
+ *
+ * Both are full-viewport and fixed, so each one the page carries is a
+ * compositing layer the size of the screen that has to be re-rasterised
+ * whenever anything under it changes. Stacking them as two background images
+ * on a single element makes it one layer for the same picture.
+ *
+ * Opacity is baked into each image — into the rgba for the dots, into the SVG
+ * for the grain — because element opacity would apply to both at once and they
+ * need different strengths. The grain is one inline turbulence: no request,
+ * about 300 bytes, and it is what stops flat colour reading as screen-flat.
+ */
+.substrate {
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)' opacity='0.13'/%3E%3C/svg%3E"),
+    radial-gradient(circle at 1px 1px, rgba(21, 21, 15, 0.085) 1px, transparent 0);
+  background-size:
+    140px 140px,
+    26px 26px;
+}
+
+/*
+ * The canvas substrate is the same field, but its dot grid is anchored to the
+ * WORLD rather than the screen: the dots pan and zoom with the notes, which is
+ * what makes the surface read as a place you are moving over rather than a
+ * texture painted on the window. Driven by --cam-x / --cam-y / --zoom.
+ */
+.canvas-substrate {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)' opacity='0.13'/%3E%3C/svg%3E"),
+    radial-gradient(circle at 1px 1px, rgba(21, 21, 15, 0.09) 1px, transparent 0);
+  background-size:
+    140px 140px,
+    calc(26px * var(--zoom)) calc(26px * var(--zoom));
+  background-position:
+    0 0,
+    calc(-1px * var(--cam-x) * var(--zoom)) calc(-1px * var(--cam-y) * var(--zoom));
+}
+
+/* Small, wide-tracked, uppercase mono. HUM's label voice. */
+.micro-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-nano);
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

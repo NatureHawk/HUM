@@ -34,6 +34,13 @@ class NoteGoneError(DomainError):
     code = "note_gone"
 
 
+class StrokeGoneError(DomainError):
+    """The stroke was deleted by someone else while this client was working on it."""
+
+    status_code = 404
+    code = "stroke_gone"
+
+
 class UnauthorizedError(DomainError):
     """No valid guest session on the request."""
 

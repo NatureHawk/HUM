@@ -226,9 +226,10 @@ And the object anatomy, which SyncBoard's notes follow:
 - a three-dot grab handle that spreads on hover — the affordance that makes
   people believe the thing moves before they try;
 - `--lift-card` at rest, `--lift-held` while held;
-- notes are the one object that is **not** white paper: accent-filled with ink
-  on top, set in the sans so they read as somebody's thought rather than a
-  system message.
+- notes are the one object that is **not** white paper: they carry a fill with
+  ink on top, set in the sans so they read as somebody's thought rather than a
+  system message. Milestone 5 widened that fill from one accent to a closed set
+  of four — see [`canvas-polish.md`](canvas-polish.md) §1.
 
 M1's palette was directionally right and specifically wrong — two earthy
 accents where HUM has one highlighter, a serif display where HUM sets a

@@ -147,7 +147,7 @@ async def test_negative_world_coordinates_are_valid(client: AsyncClient) -> None
 
 async def test_tone_round_trips(client: AsyncClient) -> None:
     board_id = await make_board(client)
-    for tone in ("accent", "paper", "ink"):
+    for tone in ("accent", "paper", "peach", "sky"):
         response = await client.post(
             f"/api/boards/{board_id}/notes",
             json={

@@ -197,13 +197,20 @@ test.describe("two browsers on one canvas", () => {
     await contextB.close();
   });
 
-  test("a drag streams to the other browser without writing to the database", async ({
+  test("a drag streams to the other browser without writing its position", async ({
     browser,
     request,
   }) => {
     // The ephemeral tier: while a note is held, its position travels over the
-    // socket so collaborators can watch, and the database sees nothing until
-    // the pointer is released.
+    // socket so collaborators can watch, and the position itself is not
+    // written until the pointer is released.
+    //
+    // Milestone 5 made grabbing raise the note to the front, which IS a real
+    // mutation — but only when the note is not already on top, which the
+    // server decides (see docs/canvas-polish.md §4). This board holds exactly
+    // one note, so it is already topmost and the grab writes nothing at all.
+    // The counting below is therefore the original one, and the property it
+    // protects is unchanged: no write per streamed frame, one on release.
     const contextA = await browser.newContext();
     const contextB = await browser.newContext();
     const A = await openAs(contextA, "Alice", boardId);
@@ -232,7 +239,9 @@ test.describe("two browsers on one canvas", () => {
       .poll(async () => (await worldPosition(B, id)).x, { timeout: 10_000 })
       .toBeGreaterThan(startWorld.x + 80);
 
-    // And nothing has been written down yet.
+    // Ten streamed frames, and the grab of an already-topmost note: nothing
+    // written at all. The position the database holds is still where the note
+    // was before anybody picked it up.
     const midFlight = await (await request.get(`${API}/boards/${boardId}`)).json();
     expect(midFlight.revision).toBe(revisionBefore);
     expect(Math.round(midFlight.notes[0].x)).toBe(Math.round(startWorld.x));
@@ -245,6 +254,8 @@ test.describe("two browsers on one canvas", () => {
         { timeout: 10_000 },
       )
       .toBe(revisionBefore + 1);
+    const settled = await (await request.get(`${API}/boards/${boardId}`)).json();
+    expect(Math.round(settled.notes[0].x)).toBeGreaterThan(Math.round(startWorld.x) + 80);
 
     await contextA.close();
     await contextB.close();

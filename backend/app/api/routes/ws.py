@@ -54,6 +54,8 @@ from app.schemas.realtime import (
     ClientEnvelope,
     DragFrame,
     DragMessage,
+    DrawFrame,
+    DrawMessage,
     EditingMessage,
     ErrorFrame,
     PingMessage,
@@ -172,6 +174,7 @@ async def board_socket(websocket: WebSocket, board_id: uuid.UUID) -> None:
                 actor=actor,
                 board=snapshot.board,
                 notes=snapshot.notes,
+                strokes=snapshot.strokes,
                 revision=snapshot.revision,
                 presence=members,
             ).model_dump_json()
@@ -261,6 +264,7 @@ async def _receive_loop(
                     actor=connection.actor,
                     board=snapshot.board,
                     notes=snapshot.notes,
+                    strokes=snapshot.strokes,
                     revision=snapshot.revision,
                     presence=members,
                 ).model_dump_json()
@@ -308,6 +312,27 @@ async def _receive_loop(
                     note_id=message.note_id,
                     x=message.x,
                     y=message.y,
+                    settled=message.settled,
+                ),
+            )
+
+        elif isinstance(message, DrawMessage):
+            # Ephemeral for the same reason a drag is: a stroke produces a new
+            # point on every pointer move, and persisting those would be
+            # thousands of writes a minute. `stroke_id` here is the client's
+            # own id for this in-progress gesture, not a database id - the
+            # single REST create on pointer-up is what actually commits it
+            # under its real, server-assigned id.
+            await hub.publish_ephemeral(
+                connection.board_id,
+                DrawFrame(
+                    board_id=connection.board_id,
+                    connection_id=connection.id,
+                    actor=connection.actor,
+                    stroke_id=message.stroke_id,
+                    points=message.points,
+                    color=message.color,
+                    width=message.width,
                     settled=message.settled,
                 ),
             )

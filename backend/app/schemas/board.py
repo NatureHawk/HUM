@@ -8,6 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.note import NoteRead
+from app.schemas.stroke import StrokeRead
 
 
 class BoardCreate(BaseModel):
@@ -43,4 +44,5 @@ class BoardSnapshot(BaseModel):
 
     board: BoardRead
     notes: list[NoteRead]
+    strokes: list[StrokeRead]
     revision: int

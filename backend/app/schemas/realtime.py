@@ -29,11 +29,13 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.note import WORLD_LIMIT
+from app.models.stroke import MAX_STROKE_POINTS, MAX_STROKE_WIDTH, MIN_STROKE_WIDTH
 from app.schemas.board import BoardRead
 from app.schemas.note import Actor, NoteRead
+from app.schemas.stroke import StrokeRead
 
 
 class PresenceMember(BaseModel):
@@ -72,6 +74,7 @@ class SyncFrame(BaseModel):
     actor: Actor
     board: BoardRead
     notes: list[NoteRead]
+    strokes: list[StrokeRead]
     revision: int
     presence: list[PresenceMember]
 
@@ -142,6 +145,31 @@ class DragFrame(BaseModel):
     settled: bool
 
 
+class DrawFrame(BaseModel):
+    """Somebody is mid-stroke, and this is the polyline so far.
+
+    Same principle as `DragFrame`, applied to the pen: a stroke produces a new
+    point on every pointer move, and persisting those would be exactly the
+    "hundreds of points per second into Postgres" this design avoids. This
+    frame is a rumour about what is being drawn right now - ephemeral, no
+    revision, never stored. `stroke_id` is a CLIENT-chosen id for this
+    in-progress gesture (not a database id yet), so other clients can track one
+    artist's stroke across frames and clear it when `settled` arrives; the
+    single REST call on pointer-up is what actually commits the stroke, under
+    its own server-assigned id.
+    """
+
+    type: Literal["presence.draw"] = "presence.draw"
+    board_id: uuid.UUID
+    connection_id: uuid.UUID
+    actor: Actor
+    stroke_id: str
+    points: list[list[float]]
+    color: str
+    width: float
+    settled: bool
+
+
 class ErrorFrame(BaseModel):
     """A protocol error. Never carries an exception or a stack trace."""
 
@@ -164,7 +192,7 @@ class PongFrame(BaseModel):
 
 
 ServerFrame = Annotated[
-    SyncFrame | PresenceFrame | PointerFrame | DragFrame | ErrorFrame | PongFrame,
+    SyncFrame | PresenceFrame | PointerFrame | DragFrame | DrawFrame | ErrorFrame | PongFrame,
     Field(discriminator="type"),
 ]
 
@@ -227,8 +255,43 @@ class DragMessage(BaseModel):
     settled: bool = False
 
 
+class DrawMessage(BaseModel):
+    """A pen stroke in progress. Ephemeral, exactly like `drag`.
+
+    `stroke_id` is minted client-side for this one gesture so the frames of
+    one stroke can be told apart from another artist's, and so `settled`'s
+    receivers know which rumour to drop. It is never treated as a database id;
+    the REST create on pointer-up assigns the real one.
+    """
+
+    type: Literal["draw"] = "draw"
+    stroke_id: str = Field(min_length=1, max_length=64)
+    points: list[list[float]] = Field(min_length=1, max_length=MAX_STROKE_POINTS)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{6}$")
+    width: float = Field(ge=MIN_STROKE_WIDTH, le=MAX_STROKE_WIDTH)
+    settled: bool = False
+
+    @field_validator("points")
+    @classmethod
+    def _points_in_world(cls, value: list[list[float]]) -> list[list[float]]:
+        """Bound the coordinates, exactly as `pointer` bounds its own.
+
+        An ephemeral frame is still untrusted input: it is stamped with this
+        connection's actor and rebroadcast to everyone on the board, so a
+        client that can put anything in it can put anything on everyone
+        else's canvas. Being unpersisted is not the same as being harmless.
+        """
+        for point in value:
+            if len(point) != 2:
+                raise ValueError("each point must be an [x, y] pair")
+            x, y = point
+            if not (-WORLD_LIMIT <= x <= WORLD_LIMIT) or not (-WORLD_LIMIT <= y <= WORLD_LIMIT):
+                raise ValueError("a stroke point fell outside the board's world bounds")
+        return value
+
+
 ClientMessage = Annotated[
-    PingMessage | ResyncMessage | EditingMessage | PointerMessage | DragMessage,
+    PingMessage | ResyncMessage | EditingMessage | PointerMessage | DragMessage | DrawMessage,
     Field(discriminator="type"),
 ]
 

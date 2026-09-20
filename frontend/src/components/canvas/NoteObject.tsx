@@ -15,7 +15,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
-import type { Note } from "@/lib/types";
+import { TONES, type Note, type NoteTone } from "@/lib/types";
 
 export interface NoteObjectProps {
   note: Note;
@@ -35,19 +35,36 @@ export interface NoteObjectProps {
   onResizePointerDown: (event: React.PointerEvent, note: Note) => void;
   onCommitText: (note: Note, updates: { title: string; body: string }, baseVersion: number) => void;
   onEditingChange: (noteId: string | null) => void;
+  /** Recolour from the contextual swatch row below. Sends only `tone`. */
+  onToneChange: (note: Note, tone: NoteTone) => void;
 }
 
+// All four curated tones are light fills, so they all take the same ink text
+// and hairline border — there is no dark tone left to special-case anymore.
 const TONE_CLASS: Record<Note["tone"], string> = {
   // The one object that is not white paper: accent-filled, ink on top.
   accent: "bg-accent border-[rgba(21,21,15,0.22)] text-ink",
   paper: "bg-paper-deep border-hair text-ink",
-  ink: "bg-ink border-[rgba(21,21,15,0.5)] text-paper",
+  peach: "bg-note-peach border-hair text-ink",
+  sky: "bg-note-sky border-hair text-ink",
 };
 
 const LABEL_CLASS: Record<Note["tone"], string> = {
   accent: "text-[rgba(21,21,15,0.62)]",
   paper: "text-ink-faint",
-  ink: "text-[rgba(251,250,246,0.6)]",
+  peach: "text-ink-faint",
+  sky: "text-ink-faint",
+};
+
+// Same fills as the toolbar's tone swatches (CanvasToolbar.TONE_SWATCH),
+// kept as its own small map here rather than shared: this one draws inside a
+// rotated, counter-scaled note rather than a static toolbar, and the two call
+// sites have nothing else in common worth coupling over four class names.
+const TONE_SWATCH: Record<NoteTone, string> = {
+  accent: "bg-accent",
+  paper: "bg-paper-deep",
+  peach: "bg-note-peach",
+  sky: "bg-note-sky",
 };
 
 export function NoteObject({
@@ -63,6 +80,7 @@ export function NoteObject({
   onResizePointerDown,
   onCommitText,
   onEditingChange,
+  onToneChange,
 }: NoteObjectProps) {
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(note.title);
@@ -206,9 +224,8 @@ export function NoteObject({
         <span
           aria-hidden="true"
           className={cn(
-            "absolute -top-[5px] right-[13px] h-[10px] w-[10px] rounded-full",
+            "absolute -top-[5px] right-[13px] h-[10px] w-[10px] rounded-full bg-ink",
             "shadow-[0_2px_4px_rgba(21,21,15,0.3)]",
-            note.tone === "ink" ? "bg-paper-up" : "bg-ink",
           )}
         />
 
@@ -223,9 +240,8 @@ export function NoteObject({
               <i
                 key={i}
                 className={cn(
-                  "h-[3px] w-[3px] rounded-full transition-transform",
+                  "h-[3px] w-[3px] rounded-full bg-[rgba(21,21,15,0.45)] transition-transform",
                   "duration-[var(--duration-slow)] ease-[var(--ease-rise)]",
-                  note.tone === "ink" ? "bg-[rgba(251,250,246,0.5)]" : "bg-[rgba(21,21,15,0.45)]",
                   heldByAnyone && i === 0 && "-translate-x-[2px]",
                   heldByAnyone && i === 2 && "translate-x-[2px]",
                 )}
@@ -306,6 +322,52 @@ export function NoteObject({
             ) : null}
           </div>
         )}
+
+        {/* Contextual colour row, floating just above the note. Only while
+            selected and not mid-edit — it is an affordance for the note as an
+            object, not for the text inside it. Anchored at its own
+            bottom-centre and counter-scaled from there, the same trick as the
+            resize handle below, so it holds a constant on-screen size and
+            position instead of shrinking to nothing at low zoom. */}
+        {selected && !editing ? (
+          <div
+            role="group"
+            aria-label="Note colour"
+            onPointerDown={(event) => event.stopPropagation()}
+            className={cn(
+              "absolute left-1/2 flex items-center gap-1 rounded-[var(--radius)] border border-hair",
+              "bg-paper-up p-1 shadow-[var(--shadow-card)]",
+            )}
+            style={{
+              // `bottom: 100%` pins the row's own bottom edge to the note's
+              // top edge; marginBottom opens a gap above that. Both are
+              // ordinary layout, computed BEFORE the scale below runs, so the
+              // scale's bottom-anchored origin has something fixed to shrink
+              // toward — anchoring off `top` here would have made the row
+              // grow back down INTO the note as zoom dropped.
+              bottom: "100%",
+              marginBottom: 10 / zoom,
+              transform: `translateX(-50%) scale(${1 / zoom})`,
+              transformOrigin: "50% 100%",
+            }}
+          >
+            {TONES.map((value) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => onToneChange(note, value)}
+                aria-label={`Colour: ${value}`}
+                aria-pressed={note.tone === value}
+                className={cn(
+                  "h-4 w-4 rounded-[var(--radius-xs)] border transition-transform",
+                  "duration-[var(--duration-fast)] ease-[var(--ease-rise)]",
+                  TONE_SWATCH[value],
+                  note.tone === value ? "scale-110 border-ink" : "border-hair hover:scale-105",
+                )}
+              />
+            ))}
+          </div>
+        ) : null}
 
         {/* Resize handle, bottom-right. Counter-scaled so it stays a
             consistent physical size however far you are zoomed out. */}

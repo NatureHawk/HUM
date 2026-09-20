@@ -4,9 +4,23 @@
  * the backend does not send; do not rename fields to be "more idiomatic".
  */
 
-export type NoteTone = "accent" | "paper" | "ink";
+/**
+ * The four curated note fills. One highlighter (`accent`) plus three muted,
+ * paper-like tones — see app/models/note.py:NoteTone for why this is a closed
+ * set rather than a free colour field. `ink` (a near-black fill) existed in
+ * Milestone 3 and is retired: a board of near-black notes is the flatness this
+ * palette exists to fix.
+ */
+export type NoteTone = "accent" | "paper" | "peach" | "sky";
 
-export const TONES: NoteTone[] = ["accent", "paper", "ink"];
+export const TONES: NoteTone[] = ["accent", "paper", "peach", "sky"];
+
+/**
+ * What a brand-new board's notes cycle through, so a fresh canvas is never
+ * four identical notes. Deliberately ordered, not random: the same sequence of
+ * placements produces the same sequence of colours every time.
+ */
+export const DEFAULT_TONE: NoteTone = "accent";
 
 /** Mirrors the bounds enforced by app/models/note.py and its CHECK constraints. */
 export const WORLD_LIMIT = 100_000;
@@ -48,6 +62,38 @@ export interface Note {
   updated_at: string;
 }
 
+/** A point in WORLD space: `[x, y]`. Matches the backend's `list[list[float]]`. */
+export type StrokePoint = [number, number];
+
+/**
+ * A freehand pen mark.
+ *
+ * `points` is data, not a picture: a polyline in WORLD coordinates, which is
+ * exactly why a stroke stays where it was drawn under any pan or zoom, and why
+ * it can be selected, restacked and deleted at all. A bitmap could do none of
+ * that. See app/models/stroke.py.
+ */
+export interface Stroke {
+  id: string;
+  board_id: string;
+  points: StrokePoint[];
+  color: string;
+  width: number;
+  /** Shares one stacking sequence with notes — see Board.z_cursor server-side. */
+  z_index: number;
+  /** Present for symmetry with Note; nothing revises a stroke in place today. */
+  version: number;
+  author_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const MIN_STROKE_WIDTH = 1;
+export const MAX_STROKE_WIDTH = 24;
+export const DEFAULT_STROKE_WIDTH = 4;
+export const DEFAULT_STROKE_COLOR = "#15150f";
+export const MAX_STROKE_POINTS = 4000;
+
 export interface Board {
   id: string;
   title: string;
@@ -61,6 +107,7 @@ export type BoardSummary = Board & { note_count: number };
 export interface BoardSnapshot {
   board: Board;
   notes: Note[];
+  strokes: Stroke[];
   revision: number;
 }
 
@@ -114,6 +161,22 @@ export interface NoteDelete {
   op_id: string;
 }
 
+export interface StrokeCreate {
+  points: StrokePoint[];
+  color?: string;
+  width?: number;
+  op_id: string;
+}
+
+export interface StrokeReorder {
+  to: "front" | "back";
+  op_id: string;
+}
+
+export interface StrokeDelete {
+  op_id: string;
+}
+
 export interface BoardCreate {
   title: string;
 }
@@ -159,16 +222,38 @@ export interface NoteDeletedEvent extends EventBase {
   note_id: string;
 }
 
+export interface StrokeCreatedEvent extends EventBase {
+  type: "stroke.created";
+  stroke: Stroke;
+}
+export interface StrokeReorderedEvent extends EventBase {
+  type: "stroke.reordered";
+  stroke: Stroke;
+  from_z_index: number;
+}
+export interface StrokeDeletedEvent extends EventBase {
+  type: "stroke.deleted";
+  stroke_id: string;
+}
+
 export type BoardEvent =
   | NoteCreatedEvent
   | NoteUpdatedEvent
   | NoteMovedEvent
   | NoteResizedEvent
   | NoteReorderedEvent
-  | NoteDeletedEvent;
+  | NoteDeletedEvent
+  | StrokeCreatedEvent
+  | StrokeReorderedEvent
+  | StrokeDeletedEvent;
 
 export interface MutationResult {
-  event: BoardEvent;
+  /**
+   * Null for a request that succeeded and changed nothing — today only
+   * "raise something that was already on top". There is no event because
+   * there was no change; see backend/app/schemas/events.py:MutationResult.
+   */
+  event: BoardEvent | null;
   board_revision: number;
 }
 
@@ -189,6 +274,7 @@ export interface SyncFrame {
   actor: Actor;
   board: Board;
   notes: Note[];
+  strokes: Stroke[];
   revision: number;
   presence: PresenceMember[];
 }
@@ -231,6 +317,24 @@ export interface DragFrame {
   settled: boolean;
 }
 
+/**
+ * Somebody is mid-stroke, and this is the polyline so far. Ephemeral, exactly
+ * like DragFrame: no revision, never stored. `stroke_id` is the drawing
+ * client's own id for the gesture — not a database id — so observers can track
+ * one artist's stroke across frames and drop it when `settled` arrives.
+ */
+export interface DrawFrame {
+  type: "presence.draw";
+  board_id: string;
+  connection_id: string;
+  actor: Actor;
+  stroke_id: string;
+  points: StrokePoint[];
+  color: string;
+  width: number;
+  settled: boolean;
+}
+
 export type WsErrorCode =
   | "unauthorized"
   | "board_not_found"
@@ -256,6 +360,7 @@ export type ServerFrame =
   | PresenceFrame
   | PointerFrame
   | DragFrame
+  | DrawFrame
   | WsErrorFrame
   | PongFrame
   | BoardEvent;
@@ -266,13 +371,22 @@ export type ClientMessage =
   | { type: "resync" }
   | { type: "editing"; note_id: string | null }
   | { type: "pointer"; x: number; y: number }
-  | { type: "drag"; note_id: string; x: number; y: number; settled: boolean };
+  | { type: "drag"; note_id: string; x: number; y: number; settled: boolean }
+  | {
+      type: "draw";
+      stroke_id: string;
+      points: StrokePoint[];
+      color: string;
+      width: number;
+      settled: boolean;
+    };
 
 export type ConnectionStatus = "connecting" | "open" | "reconnecting" | "closed";
 
 export type ApiErrorCode =
   | "version_conflict"
   | "note_gone"
+  | "stroke_gone"
   | "not_found"
   | "invalid_operation"
   | "validation_error"

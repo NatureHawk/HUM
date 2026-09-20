@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     # Lightweight abuse ceilings for a public demo. Not a security platform -
     # just enough that one visitor cannot flatten the service.
     max_notes_per_board: int = Field(default=500)
+    max_strokes_per_board: int = Field(default=300)
     max_request_bytes: int = Field(default=64 * 1024)
 
     sql_echo: bool = Field(default=False)

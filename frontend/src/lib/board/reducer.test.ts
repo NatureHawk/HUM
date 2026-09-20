@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { boardReducer, initialBoardState, type BoardState } from "@/lib/board/reducer";
-import type { Actor, Board, BoardEvent, Note } from "@/lib/types";
+import type { Actor, Board, BoardEvent, Note, Stroke } from "@/lib/types";
 
 const actor: Actor = { id: "u-1", name: "Test User" };
 
@@ -33,11 +33,35 @@ function makeNote(overrides: Partial<Note> = {}): Note {
   };
 }
 
-function loadedState(notes: Note[] = [makeNote()], revision = 1): BoardState {
+function makeStroke(overrides: Partial<Stroke> = {}): Stroke {
+  return {
+    id: "stroke-1",
+    board_id: "board-1",
+    points: [
+      [0, 0],
+      [10, 10],
+    ],
+    color: "#15150f",
+    width: 4,
+    z_index: 1,
+    version: 1,
+    author_name: "Test User",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function loadedState(
+  notes: Note[] = [makeNote()],
+  revision = 1,
+  strokes: Stroke[] = [],
+): BoardState {
   return boardReducer(initialBoardState, {
     type: "snapshotLoaded",
     board,
     notes,
+    strokes,
     revision,
   });
 }
@@ -74,6 +98,7 @@ describe("boardReducer: snapshots", () => {
       type: "snapshotLoaded",
       board,
       notes: [makeNote({ id: "note-old" })],
+      strokes: [],
       revision: 4,
     });
 
@@ -81,6 +106,12 @@ describe("boardReducer: snapshots", () => {
     expect(stale.notes["note-new"]).toBeDefined();
     expect(stale.notes["note-old"]).toBeUndefined();
     expect(stale.status).toBe("ready");
+  });
+
+  it("normalizes strokes by id, same as notes", () => {
+    const state = loadedState([makeNote()], 1, [makeStroke(), makeStroke({ id: "stroke-2" })]);
+    expect(state.strokes["stroke-1"]).toBeDefined();
+    expect(state.strokes["stroke-2"]).toBeDefined();
   });
 });
 
@@ -264,6 +295,28 @@ describe("boardReducer: optimistic operations", () => {
     expect(state.notes["temp-mine"]).toBeDefined();
   });
 
+  it("discards the optimistic guess when the server changed nothing", () => {
+    // Raising a note that is already on top is answered with no event at all
+    // (MutationResult.event === null). Nothing authoritative follows, so the
+    // optimistic upsert has to be undone here or a stale note - one whose
+    // z_index the server never agreed to - would sit in state forever.
+    let state = loadedState([makeNote({ z_index: 4 })]);
+    const original = state.notes["note-1"];
+
+    state = boardReducer(state, {
+      type: "optimisticApply",
+      opId: "op-noop",
+      change: { kind: "upsert", note: makeNote({ z_index: 99 }) },
+    });
+    expect(state.notes["note-1"].z_index).toBe(99);
+
+    state = boardReducer(state, { type: "opReverted", opId: "op-noop" });
+    expect(state.notes["note-1"]).toEqual(original);
+    expect(state.pending["op-noop"]).toBeUndefined();
+    // Unlike a failure, a no-op is not something to tell the user about.
+    expect(state.error).toBeNull();
+  });
+
   it("overrides a note with the server's copy on a version conflict", () => {
     // Arrives with no revision attached, so it cannot flow through the
     // gap-checked event path without corrupting the counter.
@@ -275,5 +328,117 @@ describe("boardReducer: optimistic operations", () => {
     expect(next.notes["note-1"].title).toBe("server wins");
     expect(next.notes["note-1"].version).toBe(7);
     expect(next.revision).toBe(state.revision);
+  });
+});
+
+function strokeEvent(overrides: Partial<BoardEvent> = {}): BoardEvent {
+  return {
+    id: "stroke-event-1",
+    board_id: "board-1",
+    revision: 2,
+    occurred_at: "2026-01-01T00:01:00Z",
+    op_id: null,
+    actor,
+    type: "stroke.created",
+    stroke: makeStroke({ id: "stroke-2" }),
+    ...overrides,
+  } as BoardEvent;
+}
+
+describe("boardReducer: stroke events", () => {
+  it("upserts a stroke on stroke.created and stroke.reordered, and advances revision", () => {
+    let state = loadedState([makeNote()], 1, [makeStroke()]);
+
+    state = boardReducer(state, {
+      type: "eventReceived",
+      event: strokeEvent({ id: "e-created", revision: 2, type: "stroke.created" }),
+    });
+    expect(state.strokes["stroke-2"]).toBeDefined();
+    expect(state.revision).toBe(2);
+
+    state = boardReducer(state, {
+      type: "eventReceived",
+      event: strokeEvent({
+        id: "e-reordered",
+        revision: 3,
+        type: "stroke.reordered",
+        stroke: makeStroke({ z_index: 99 }),
+        from_z_index: 1,
+      } as Partial<BoardEvent>),
+    });
+    expect(state.strokes["stroke-1"].z_index).toBe(99);
+    expect(state.revision).toBe(3);
+  });
+
+  it("removes a stroke on stroke.deleted", () => {
+    const state = boardReducer(loadedState([makeNote()], 1, [makeStroke()]), {
+      type: "eventReceived",
+      event: strokeEvent({
+        id: "e-del",
+        revision: 2,
+        type: "stroke.deleted",
+        stroke_id: "stroke-1",
+      } as Partial<BoardEvent>),
+    });
+    expect(state.strokes["stroke-1"]).toBeUndefined();
+  });
+
+  it("dedupes a stroke event by id, like note events", () => {
+    let state = loadedState([makeNote()], 1, []);
+    const e = strokeEvent({ id: "dup-stroke", revision: 2 });
+    state = boardReducer(state, { type: "eventReceived", event: e });
+    const afterFirst = state;
+    state = boardReducer(state, { type: "eventReceived", event: e });
+    expect(state).toBe(afterFirst);
+  });
+});
+
+describe("boardReducer: stroke optimistic operations", () => {
+  it("rolls an optimistic stroke creation back out of existence on strokeOpFailed", () => {
+    let state = loadedState([makeNote()], 1, []);
+    state = boardReducer(state, {
+      type: "strokeOptimisticApply",
+      opId: "sop-1",
+      tempStrokeId: "temp-stroke-1",
+      change: { kind: "upsert", stroke: makeStroke({ id: "temp-stroke-1" }) },
+    });
+    expect(state.strokes["temp-stroke-1"]).toBeDefined();
+
+    state = boardReducer(state, {
+      type: "strokeOpFailed",
+      opId: "sop-1",
+      message: "rejected",
+    });
+    expect(state.strokes["temp-stroke-1"]).toBeUndefined();
+    expect(state.error).toBe("rejected");
+    expect(state.strokePending["sop-1"]).toBeUndefined();
+  });
+
+  it("retires the placeholder when the client's own stroke.created broadcast arrives first", () => {
+    // Same race as notes: the realtime broadcast of your own stroke can beat
+    // the HTTP response back, so the temp entry has to go the moment the
+    // authoritative stroke lands under its real id — via eventReceived's
+    // op_id reconciliation, not via strokeOpSettled.
+    let state = loadedState([makeNote()], 1, []);
+    state = boardReducer(state, {
+      type: "strokeOptimisticApply",
+      opId: "sop-2",
+      tempStrokeId: "temp-stroke-9",
+      change: { kind: "upsert", stroke: makeStroke({ id: "temp-stroke-9" }) },
+    });
+
+    state = boardReducer(state, {
+      type: "eventReceived",
+      event: strokeEvent({
+        id: "own-stroke",
+        revision: 2,
+        op_id: "sop-2",
+        stroke: makeStroke({ id: "stroke-real" }),
+      }),
+    });
+
+    expect(state.strokes["temp-stroke-9"]).toBeUndefined();
+    expect(state.strokes["stroke-real"]).toBeDefined();
+    expect(state.strokePending["sop-2"]).toBeUndefined();
   });
 });

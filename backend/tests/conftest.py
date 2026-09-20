@@ -28,6 +28,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import app.api.routes.ws as ws_module
+import app.core.redis as redis_module
 import app.main as main_module
 import app.models  # noqa: F401  registers the tables on Base.metadata
 from app.core.config import get_settings
@@ -94,7 +95,7 @@ async def clean_tables(engine) -> AsyncIterator[None]:  # type: ignore[no-untype
     and `revision` lives on the row.
     """
     async with engine.begin() as conn:
-        await conn.exec_driver_sql("TRUNCATE notes, boards CASCADE")
+        await conn.exec_driver_sql("TRUNCATE strokes, notes, boards CASCADE")
     yield
 
 
@@ -220,16 +221,31 @@ def sync_client(engine, clean_tables, monkeypatch):  # type: ignore[no-untyped-d
 
     # `app.main` imported both names directly, so replacing them there is
     # enough; AsyncEngine.dispose itself is read-only and cannot be patched in
-    # place. The Redis client has the same cross-loop problem as the engine:
-    # its connection was opened on the async tests' loop, and closing it from
-    # TestClient's loop raises the same "Event loop is closed".
-    async def _skip_close_redis() -> None:
-        return None
-
+    # place.
     monkeypatch.setattr(main_module, "engine", _NoDispose())
-    monkeypatch.setattr(main_module, "close_redis", _skip_close_redis)
+
+    # Redis gets the opposite treatment to the engine, and the difference is
+    # the whole point.
+    #
+    # `app.core.redis` caches ONE client for the process. Each TestClient runs
+    # the app's lifespan on its own anyio portal - a different event loop every
+    # time - so a cached client survives into the next test still bound to the
+    # loop that created it. redis-py's asyncio connections are not portable
+    # across loops: the pooled connection's reader is attached to a loop that
+    # has since closed, so the next pub/sub round trip on it never completes.
+    # That does not fail, it HANGS - the symptom is one socket test waiting
+    # forever for a frame another socket really did publish, and it surfaces
+    # only when something ran before it, which is what made it look like a
+    # flake for so long.
+    #
+    # So: drop the cached client before the lifespan starts, which forces
+    # `get_redis()` to build a fresh one on THIS portal's loop, and let the
+    # real `close_redis` run at shutdown - it is now closing a client on the
+    # same loop that opened it, which is exactly the case that is safe.
+    redis_module._client = None
 
     with TestClient(fastapi_app) as c:
         c.post("/api/session")
         yield c
     fastapi_app.dependency_overrides.clear()
+    redis_module._client = None

@@ -13,13 +13,17 @@ concurrency, and the board UI.
 second system.
 **Milestone 3** replaced the Kanban board with a freeform canvas: sticky notes at arbitrary
 world positions, overlapping, dragged around by several people at once.
-**Milestone 4 (current)** finished the MVP and made it deployable: server-issued guest
+**Milestone 4** finished the MVP and made it deployable: server-issued guest
 sessions instead of client-declared identity, environment-driven configuration throughout,
 a production container, and deployment documentation.
+**Milestone 5 (current)** made the canvas feel like a place rather than a diagram: a
+curated four-tone note palette, a freehand pen whose strokes are world-coordinate data
+rather than pixels, and stacking that follows the physical rule — the last object you
+grab is the one on top.
 
 Design rationale, with the alternatives that were rejected and why:
 [`docs/architecture.md`](docs/architecture.md), [`docs/realtime.md`](docs/realtime.md),
-[`docs/canvas.md`](docs/canvas.md).
+[`docs/canvas.md`](docs/canvas.md), [`docs/canvas-polish.md`](docs/canvas-polish.md).
 To put it on the internet: [`docs/deployment.md`](docs/deployment.md).
 
 ---
@@ -104,7 +108,7 @@ healthy replicas. Readiness really probes both dependencies, under a timeout.
 ```bash
 # backend
 cd backend
-.venv/Scripts/python -m pytest          # 66 tests, real Postgres + real Redis
+.venv/Scripts/python -m pytest          # 97 tests, real Postgres + real Redis
 .venv/Scripts/python -m ruff check .
 .venv/Scripts/python -m ruff format --check .
 .venv/Scripts/python -m mypy app        # strict
@@ -179,6 +183,14 @@ which is the right answer for two people physically fighting over one object.
 
 - Create, list, open and delete boards
 - Create, edit (title and body), move, resize, restack and delete notes
+- **Four curated note colours**, set for new notes or changed on a selected one — a
+  tone change is a one-field update, not a whole-note replacement
+- **A freehand pen**: strokes are world-coordinate polylines, not pixels, so they stay
+  put under pan and zoom and can be selected, restacked and deleted. Collaborators watch
+  a stroke as it is drawn; one completed stroke is one row and one revision
+- **Grab-to-front stacking**: the last object you pick up is the one on top, notes and
+  drawings sharing a single server-assigned order. Raising something already on top is
+  recognised as a no-op and costs nothing
 - **Real-time collaboration**: two browsers on one board see each other's creates, edits,
   moves and deletes immediately, with no refresh
 - **Real presence**: live collaborator avatars, multi-tab aware, plus an advisory

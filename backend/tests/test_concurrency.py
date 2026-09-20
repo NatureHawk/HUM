@@ -83,6 +83,11 @@ async def test_resize_and_reorder_do_not_bump_the_content_version(client: AsyncC
     )
     assert resized.json()["event"]["note"]["version"] == 1
 
+    # A second note, so the first one is genuinely NOT on top and the reorder
+    # below is a real restack rather than the no-op that raising an
+    # already-topmost object now is.
+    await add_note(client, board_id, title="on top")
+
     reordered = await client.post(
         f"/api/notes/{note['id']}/order",
         json={"to": "front", "op_id": str(uuid.uuid4())},
@@ -139,7 +144,7 @@ async def test_a_move_writes_only_position(client: AsyncClient, second_client: A
         f"/api/notes/{note['id']}",
         json={
             "body": "and me",
-            "tone": "ink",
+            "tone": "sky",
             "expected_version": 1,
             "op_id": str(uuid.uuid4()),
         },
@@ -155,7 +160,7 @@ async def test_a_move_writes_only_position(client: AsyncClient, second_client: A
     assert (moved["x"], moved["y"]) == (42, 84)
     assert moved["title"] == "Keep me"
     assert moved["body"] == "and me"
-    assert moved["tone"] == "ink"
+    assert moved["tone"] == "sky"
     assert moved["width"] == note["width"]
     assert moved["z_index"] == note["z_index"]
 
@@ -365,6 +370,192 @@ async def test_concurrent_moves_are_last_writer_wins_and_converge(
 
     snapshot = (await client.get(f"/api/boards/{board_id}")).json()
     assert (snapshot["notes"][0]["x"], snapshot["notes"][0]["y"]) == (800, 250)
+
+
+async def test_the_last_object_grabbed_is_the_one_on_top(
+    client: AsyncClient, second_client: AsyncClient
+) -> None:
+    """The physical rule, which is what "grab" now means on the canvas.
+
+    The frontend calls this endpoint on every pointer-down on a note, not only
+    from an explicit "bring to front" command, so this is the API-level shape
+    of "pick a thing up and it is in front". Alice grabbing note 1, then note
+    2, then Bob grabbing note 1 again must leave all three observers agreeing
+    that note 1 is on top - and they do, because nobody ever sends a z-index:
+    the server resolves every "front" against its own serialized order.
+    """
+    board_id = await make_board(client)
+    one = await add_note(client, board_id, title="one")
+    two = await add_note(client, board_id, title="two")
+
+    async def grab(caller: AsyncClient, note: dict) -> dict:
+        response = await caller.post(
+            f"/api/notes/{note['id']}/order",
+            json={"to": "front", "op_id": str(uuid.uuid4())},
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["event"]["note"]
+
+    # Alice grabs the lower note: it comes to the front.
+    raised_one = await grab(client, one)
+    assert raised_one["z_index"] > two["z_index"]
+
+    # Alice grabs the other one: now that one is in front.
+    raised_two = await grab(client, two)
+    assert raised_two["z_index"] > raised_one["z_index"]
+
+    # Bob grabs the first note again - and both clients read the same stack,
+    # because the stack is board state, not either browser's render order.
+    regrabbed_one = await grab(second_client, one)
+    assert regrabbed_one["z_index"] > raised_two["z_index"]
+
+    for reader in (client, second_client):
+        stack = (await reader.get(f"/api/boards/{board_id}")).json()["notes"]
+        assert [n["title"] for n in stack] == ["two", "one"], "both must agree on the order"
+
+
+async def test_raising_an_already_topmost_object_is_a_no_op(client: AsyncClient) -> None:
+    """Grabbing the thing that is already on top must cost nothing.
+
+    Grabbing is what raises, so this endpoint is hit on every pointer-down -
+    and the most common grab of all is picking up the note you are already
+    looking at. Without this, each one would be a row write, a board revision
+    and a broadcast ordering every other client to restack something that
+    never moved.
+
+    "Already on top" is judged across BOTH tables, because notes and strokes
+    share one stacking sequence: a note at the highest note-z is NOT topmost
+    if a stroke sits above it.
+    """
+    board_id = await make_board(client)
+    note = await add_note(client, board_id, title="lower")
+    top = await add_note(client, board_id, title="upper")
+    settled = (await client.get(f"/api/boards/{board_id}")).json()["revision"]
+
+    # The top note, grabbed repeatedly: success every time, nothing written.
+    for _ in range(3):
+        response = await client.post(
+            f"/api/notes/{top['id']}/order",
+            json={"to": "front", "op_id": str(uuid.uuid4())},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["event"] is None, "a no-op must not invent an event"
+        assert body["board_revision"] == settled
+
+    after = (await client.get(f"/api/boards/{board_id}")).json()
+    assert after["revision"] == settled, "no revision may be consumed"
+    assert [n["title"] for n in after["notes"]] == ["lower", "upper"]
+    assert [n["z_index"] for n in after["notes"]] == [
+        note["z_index"],
+        top["z_index"],
+    ], "no z_index may change"
+
+    # The one that is NOT on top still raises, exactly as before.
+    raised = await client.post(
+        f"/api/notes/{note['id']}/order",
+        json={"to": "front", "op_id": str(uuid.uuid4())},
+    )
+    assert raised.json()["event"]["type"] == "note.reordered"
+    assert raised.json()["board_revision"] == settled + 1
+    assert raised.json()["event"]["note"]["z_index"] > top["z_index"]
+
+    # And having just been raised, IT is now the no-op case.
+    again = await client.post(
+        f"/api/notes/{note['id']}/order",
+        json={"to": "front", "op_id": str(uuid.uuid4())},
+    )
+    assert again.json()["event"] is None
+    assert again.json()["board_revision"] == settled + 1
+
+
+async def test_a_note_under_a_stroke_is_not_treated_as_topmost(client: AsyncClient) -> None:
+    """The cross-table half of the check, which is the half that can silently
+    rot: if "topmost" were computed per table, the highest note would look
+    topmost while a stroke sat visibly on top of it, and grabbing that note
+    would do nothing at all."""
+    board_id = await make_board(client)
+    note = await add_note(client, board_id, title="under the drawing")
+    stroke = (
+        await client.post(
+            f"/api/boards/{board_id}/strokes",
+            json={"points": [[0, 0], [50, 50]], "op_id": str(uuid.uuid4())},
+        )
+    ).json()["event"]["stroke"]
+    assert stroke["z_index"] > note["z_index"]
+
+    # The note IS the highest note. It is not the highest object.
+    raised = await client.post(
+        f"/api/notes/{note['id']}/order",
+        json={"to": "front", "op_id": str(uuid.uuid4())},
+    )
+    assert raised.json()["event"] is not None, "a note under a stroke must really raise"
+    assert raised.json()["event"]["note"]["z_index"] > stroke["z_index"]
+
+    # Now it is topmost across both tables, so grabbing it again is free.
+    assert (
+        await client.post(
+            f"/api/notes/{note['id']}/order",
+            json={"to": "front", "op_id": str(uuid.uuid4())},
+        )
+    ).json()["event"] is None
+
+    # And the stroke, now underneath, still raises for real.
+    stroke_raise = await client.post(
+        f"/api/strokes/{stroke['id']}/order",
+        json={"to": "front", "op_id": str(uuid.uuid4())},
+    )
+    assert stroke_raise.json()["event"]["type"] == "stroke.reordered"
+    assert (
+        await client.post(
+            f"/api/strokes/{stroke['id']}/order",
+            json={"to": "front", "op_id": str(uuid.uuid4())},
+        )
+    ).json()["event"] is None
+
+
+async def test_simultaneous_grabs_of_different_objects_converge(
+    client: AsyncClient, second_client: AsyncClient
+) -> None:
+    """Two people grabbing two different objects at the same instant.
+
+    There is no correct answer to "who is on top" here other than "whichever
+    the database committed last" - the point is that there IS one answer, the
+    same one for everybody, and that the two z-indexes never collide. Both
+    objects raise through the one shared board cursor, so a note and a stroke
+    compete on a single axis rather than in two stacks that only coincidentally
+    agree.
+    """
+    board_id = await make_board(client)
+    note = await add_note(client, board_id, title="note")
+    stroke = (
+        await client.post(
+            f"/api/boards/{board_id}/strokes",
+            json={"points": [[0, 0], [10, 10]], "op_id": str(uuid.uuid4())},
+        )
+    ).json()["event"]["stroke"]
+
+    note_raise, stroke_raise = await asyncio.gather(
+        client.post(
+            f"/api/notes/{note['id']}/order",
+            json={"to": "front", "op_id": str(uuid.uuid4())},
+        ),
+        second_client.post(
+            f"/api/strokes/{stroke['id']}/order",
+            json={"to": "front", "op_id": str(uuid.uuid4())},
+        ),
+    )
+    assert note_raise.status_code == 200
+    assert stroke_raise.status_code == 200
+
+    snapshot = (await client.get(f"/api/boards/{board_id}")).json()
+    final_note_z = snapshot["notes"][0]["z_index"]
+    final_stroke_z = snapshot["strokes"][0]["z_index"]
+
+    # Serialized by the board lock: one of them is strictly on top, and the
+    # revisions are gapless, so neither raise was lost.
+    assert final_note_z != final_stroke_z
+    assert snapshot["revision"] == 4  # 2 creations + 2 raises, nothing dropped
 
 
 # ---------------------------------------------------------------------------

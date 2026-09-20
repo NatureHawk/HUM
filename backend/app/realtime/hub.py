@@ -33,7 +33,7 @@ from redis.exceptions import RedisError
 
 from app.schemas.events import BoardEvent
 from app.schemas.note import Actor
-from app.schemas.realtime import DragFrame, PointerFrame, PresenceFrame
+from app.schemas.realtime import DragFrame, DrawFrame, PointerFrame, PresenceFrame
 
 logger = logging.getLogger(__name__)
 
@@ -178,8 +178,10 @@ class RealtimeHub:
     async def publish_presence(self, frame: PresenceFrame) -> None:
         await self._publish(frame.board_id, frame.model_dump_json())
 
-    async def publish_ephemeral(self, board_id: uuid.UUID, frame: PointerFrame | DragFrame) -> None:
-        """Fan out a cursor or a drag position.
+    async def publish_ephemeral(
+        self, board_id: uuid.UUID, frame: PointerFrame | DragFrame | DrawFrame
+    ) -> None:
+        """Fan out a cursor, a drag position, or an in-progress pen stroke.
 
         Same channel and same delivery path as everything else, but nothing is
         written down and no revision is consumed. These frames describe what is

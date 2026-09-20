@@ -25,6 +25,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from app.schemas.note import Actor, NoteRead
+from app.schemas.stroke import StrokeRead
 
 
 class EventBase(BaseModel):
@@ -79,19 +80,50 @@ class NoteDeletedEvent(EventBase):
     note_id: uuid.UUID
 
 
+class StrokeCreatedEvent(EventBase):
+    type: Literal["stroke.created"] = "stroke.created"
+    stroke: StrokeRead
+
+
+class StrokeReorderedEvent(EventBase):
+    type: Literal["stroke.reordered"] = "stroke.reordered"
+    stroke: StrokeRead
+    from_z_index: int
+
+
+class StrokeDeletedEvent(EventBase):
+    type: Literal["stroke.deleted"] = "stroke.deleted"
+    stroke_id: uuid.UUID
+
+
 BoardEvent = Annotated[
     NoteCreatedEvent
     | NoteUpdatedEvent
     | NoteMovedEvent
     | NoteResizedEvent
     | NoteReorderedEvent
-    | NoteDeletedEvent,
+    | NoteDeletedEvent
+    | StrokeCreatedEvent
+    | StrokeReorderedEvent
+    | StrokeDeletedEvent,
     Field(discriminator="type"),
 ]
 
 
 class MutationResult(BaseModel):
-    """What every mutating endpoint returns."""
+    """What every mutating endpoint returns.
 
-    event: BoardEvent
+    `event` is null in exactly one case: a request that was valid, succeeded,
+    and changed nothing - today that is raising an object that was already on
+    top. Returning a `note.reordered` event there would be the one thing this
+    envelope must never do, which is describe a change that did not happen: it
+    would consume a revision, reach every other client, and tell them to
+    restack for no reason.
+
+    So the no-op answers honestly - no event, and `board_revision` unchanged -
+    and the caller simply has nothing to apply. Every mutation that DID change
+    something still returns the same envelope it always did.
+    """
+
+    event: BoardEvent | None = None
     board_revision: int

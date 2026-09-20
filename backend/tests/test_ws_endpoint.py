@@ -398,6 +398,111 @@ def test_out_of_range_pointer_is_rejected_and_the_socket_survives(
         assert _read_until(ws, lambda f: f["type"] == "pong")["type"] == "pong"
 
 
+def test_sync_frame_carries_strokes_alongside_notes(sync_client: TestClient) -> None:
+    board_id = _make_board(sync_client)
+    stroke = sync_client.post(
+        f"/api/boards/{board_id}/strokes",
+        json={
+            "points": [[0, 0], [10, 10]],
+            "op_id": str(uuid.uuid4()),
+        },
+    ).json()["event"]["stroke"]
+
+    with sync_client.websocket_connect(_connect_url(board_id)) as ws:
+        frame = ws.receive_json()
+        assert frame["type"] == "sync"
+        assert frame["strokes"][0]["id"] == stroke["id"]
+
+
+def test_draw_frames_are_broadcast_without_touching_postgres(
+    sync_client: TestClient,
+    second_sync_client: TestClient,
+) -> None:
+    """The pen's equivalent of the drag test above: a stroke in progress
+    streams over the socket so collaborators can watch it being drawn, while
+    the database sees nothing until the single REST create on pointer-up."""
+    board_id = _make_board(sync_client)
+    alice_actor = sync_client.post("/api/session").json()["actor"]
+    stroke_id = "local-stroke-1"
+
+    before = sync_client.get(f"/api/boards/{board_id}").json()["revision"]
+
+    with sync_client.websocket_connect(_connect_url(board_id)) as alice:
+        _read_until(alice, lambda f: f["type"] == "sync")
+
+        with second_sync_client.websocket_connect(_connect_url(board_id)) as bob:
+            _read_until(bob, lambda f: f["type"] == "sync")
+
+            points: list[list[float]] = []
+            for step in range(8):
+                points.append([step * 9.0, 100.0])
+                alice.send_json(
+                    {
+                        "type": "draw",
+                        "stroke_id": stroke_id,
+                        "points": points,
+                        "color": "#15150f",
+                        "width": 4,
+                        "settled": False,
+                    }
+                )
+            drawing = _read_until(bob, lambda f: f["type"] == "presence.draw", max_frames=20)
+
+            alice.send_json(
+                {
+                    "type": "draw",
+                    "stroke_id": stroke_id,
+                    "points": points,
+                    "color": "#15150f",
+                    "width": 4,
+                    "settled": True,
+                }
+            )
+            settled = _read_until(
+                bob,
+                lambda f: f["type"] == "presence.draw" and f["settled"],
+                max_frames=20,
+            )
+
+    assert drawing["stroke_id"] == stroke_id
+    assert drawing["actor"]["name"] == alice_actor["name"]
+    assert drawing["settled"] is False
+    assert "revision" not in drawing
+    assert settled["settled"] is True
+
+    after = sync_client.get(f"/api/boards/{board_id}").json()["revision"]
+    assert after == before, "streaming a stroke must not write to the database"
+    assert sync_client.get(f"/api/boards/{board_id}").json()["strokes"] == []
+
+
+def test_out_of_range_draw_points_are_rejected_and_the_socket_survives(
+    sync_client: TestClient,
+) -> None:
+    """An ephemeral frame is still untrusted input. It is stamped with this
+    connection's actor and rebroadcast to the whole board, so "it is never
+    persisted" is not a reason to skip validating it."""
+    board_id = _make_board(sync_client)
+
+    with sync_client.websocket_connect(_connect_url(board_id)) as ws:
+        _read_until(ws, lambda f: f["type"] == "sync")
+
+        ws.send_json(
+            {
+                "type": "draw",
+                "stroke_id": "local-1",
+                "points": [[0, 0], [9_999_999, 0]],
+                "color": "#15150f",
+                "width": 4,
+                "settled": False,
+            }
+        )
+        error = _read_until(ws, lambda f: f["type"] == "error")
+        assert error["code"] == "invalid_event"
+
+        ws.send_json({"type": "ping"})
+        assert _read_until(ws, lambda f: f["type"] == "pong")["type"] == "pong"
+
+
 def test_a_client_cannot_forge_the_actor_on_an_ephemeral_frame(
     sync_client: TestClient,
     second_sync_client: TestClient,

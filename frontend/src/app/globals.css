@@ -34,6 +34,17 @@
   --color-accent-deep: #b3d621;
   --color-accent-wash: rgba(203, 240, 60, 0.28);
 
+  /*
+   * Notes are the one object on the board that carries fill — everything
+   * else here is ground, ink or hairline. That is exactly why the set stays
+   * closed at four: accent (the one highlighter) plus paper (the ground's
+   * own recess) plus these two, muted and paper-like on purpose. A fifth
+   * would start reading as a colour picker instead of a curated palette, and
+   * a saturated fifth would break the "one highlighter" rule above.
+   */
+  --color-note-peach: #e2c2ac;
+  --color-note-sky: #c9cde3;
+
   --color-danger: #a3372c;
   --color-danger-soft: #ecd3ce;
 

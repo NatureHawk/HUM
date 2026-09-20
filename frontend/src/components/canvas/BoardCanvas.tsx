@@ -17,7 +17,15 @@ import { Spinner } from "@/components/ui/Spinner";
 import { useBoard } from "@/lib/board/useBoard";
 import { cn } from "@/lib/cn";
 import { useSession } from "@/lib/session";
-import { DEFAULT_HEIGHT, DEFAULT_WIDTH, type Note, type NoteTone } from "@/lib/types";
+import {
+  DEFAULT_HEIGHT,
+  DEFAULT_TONE,
+  DEFAULT_WIDTH,
+  TONES,
+  type Note,
+  type NoteTone,
+} from "@/lib/types";
+import type { CanvasTool } from "@/components/canvas/CanvasToolbar";
 
 export function BoardCanvas({ boardId }: { boardId: string }) {
   const { actor, failed, rename } = useSession();
@@ -58,7 +66,23 @@ function Workspace({
   const board = useBoard(boardId, actor);
   const { state, notes } = board;
 
-  const [tone, setTone] = useState<NoteTone>("accent");
+  const [tool, setTool] = useState<CanvasTool>("select");
+
+  // The toolbar's tone: the DEFAULT for the next note, and the user's own
+  // explicit choice once they touch a swatch. Those are different things —
+  // conflating them is what would leave a fresh board four identical notes,
+  // since nobody has touched a swatch yet on a board they just opened.
+  // `tonePicked` is the flag that tells the two apart: false means "nobody's
+  // chosen anything, keep cycling"; it flips permanently true the first time
+  // `setTone` is called from the toolbar rather than from this cycling.
+  const [tone, setToneState] = useState<NoteTone>(DEFAULT_TONE);
+  const [tonePicked, setTonePicked] = useState(false);
+
+  const setTone = useCallback((next: NoteTone) => {
+    setTonePicked(true);
+    setToneState(next);
+  }, []);
+
   // The note whose editor should open by itself. Creation is meant to be one
   // gesture - place it and start typing - not place it, then go back and
   // click it.
@@ -93,9 +117,20 @@ function Workspace({
       });
       // The REAL id, not the optimistic placeholder: the placeholder is gone
       // by now, replaced by the authoritative note.
-      if (id !== null) setAutoEditId(id);
+      if (id !== null) {
+        setAutoEditId(id);
+        // Advance to the next tone ONLY while the user has never explicitly
+        // picked one — deterministic, not random, so the same sequence of
+        // placements always produces the same sequence of colours. The
+        // moment someone touches a swatch, `setTone` (above) latches
+        // `tonePicked` and this stops running: their choice sticks for every
+        // note after that, same as before this milestone.
+        if (!tonePicked) {
+          setToneState((current) => TONES[(TONES.indexOf(current) + 1) % TONES.length]);
+        }
+      }
     },
-    [board, tone],
+    [board, tone, tonePicked],
   );
 
   const createAtCenter = useCallback(() => {
@@ -134,10 +169,13 @@ function Workspace({
       ) : (
         <CanvasStage
           notes={notes}
+          strokes={board.strokes}
           remoteDrags={board.remoteDrags}
+          remoteStrokes={board.remoteStrokes}
           cursors={board.cursors}
           selfActorId={actor.id}
           editingByOthers={editingByOthers}
+          tool={tool}
           onCreateAt={(x, y) => void createAt(x, y)}
           autoEditId={autoEditId}
           onMove={(note, x, y) => void board.moveNote(note, x, y)}
@@ -146,8 +184,14 @@ function Workspace({
           onDelete={(note) => void board.deleteNote(note)}
           onReorder={(note, to) => void board.reorderNote(note, to)}
           onEditingChange={board.setEditing}
+          onToneChange={(note, nextTone) => void board.updateNote(note, { tone: nextTone }, note.version)}
+          onGrabNote={(note) => void board.reorderNote(note, "front")}
+          onCreateStroke={(points) => void board.createStroke({ points })}
+          onDeleteStroke={(stroke) => void board.deleteStroke(stroke)}
+          onSelectStroke={(stroke) => void board.reorderStroke(stroke, "front")}
           sendDrag={board.sendDrag}
           sendPointer={board.sendPointer}
+          sendDraw={board.sendDraw}
           onCameraReady={onCameraReady}
         />
       )}
@@ -196,6 +240,8 @@ function Workspace({
           zoom={zoom}
           tone={tone}
           onToneChange={setTone}
+          tool={tool}
+          onToolChange={setTool}
           onCreate={createAtCenter}
           onZoomIn={() => cameraRef.current?.zoomBy(1.25)}
           onZoomOut={() => cameraRef.current?.zoomBy(0.8)}
@@ -210,16 +256,18 @@ function Workspace({
         onDismissNotice={board.dismissResyncNotice}
       />
 
-      {/* An empty board should say so, and say what to do about it. */}
-      {!loading && !failed && notes.length === 0 ? (
+      {/* An empty board should say so, and say what to do about it. Checked
+          against strokes too now: a board someone has only drawn on is not
+          "nothing here". */}
+      {!loading && !failed && notes.length === 0 && board.strokes.length === 0 ? (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
           <div className="max-w-sm px-6 text-center">
             <p className="font-display text-4xl leading-[1.05] tracking-tight">
               Nothing here yet.
             </p>
             <p className="mt-3 text-[15px] leading-relaxed text-ink-soft">
-              Double-click anywhere to leave a note. Drag it wherever it belongs — everyone
-              else watches it move.
+              Double-click anywhere to leave a note, or switch to the pen and draw. Drag a
+              note wherever it belongs — everyone else watches it move.
             </p>
           </div>
         </div>

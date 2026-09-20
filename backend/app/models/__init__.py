@@ -2,5 +2,6 @@
 
 from app.models.board import Board
 from app.models.note import TONES, Note, NoteTone
+from app.models.stroke import Stroke
 
-__all__ = ["TONES", "Board", "Note", "NoteTone"]
+__all__ = ["TONES", "Board", "Note", "NoteTone", "Stroke"]

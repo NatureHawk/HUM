@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import NotFoundError
 from app.repositories import boards as board_repo
 from app.repositories import notes as note_repo
+from app.repositories import strokes as stroke_repo
 from app.schemas.board import BoardRead, BoardSnapshot, BoardSummary
 from app.schemas.note import NoteRead
+from app.schemas.stroke import StrokeRead
 
 
 async def create_board(session: AsyncSession, *, title: str) -> BoardRead:
@@ -53,9 +55,11 @@ async def get_snapshot(session: AsyncSession, board_id: uuid.UUID) -> BoardSnaps
         raise NotFoundError(f"board {board_id} does not exist")
 
     notes = await note_repo.list_for_board(session, board_id)
+    strokes = await stroke_repo.list_for_board(session, board_id)
     return BoardSnapshot(
         board=BoardRead.model_validate(board),
         notes=[NoteRead.model_validate(n) for n in notes],
+        strokes=[StrokeRead.model_validate(s) for s in strokes],
         revision=board.revision,
     )
 

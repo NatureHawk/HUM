@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import boards, health, ws
+from app.api.routes import boards, health, strokes, ws
 from app.api.routes import session as session_routes
 from app.core.config import get_settings
 from app.core.errors import DomainError
@@ -95,6 +95,7 @@ async def domain_error_handler(_: Request, exc: DomainError) -> JSONResponse:
 app.include_router(health.router, prefix="/api")
 app.include_router(session_routes.router, prefix="/api")
 app.include_router(boards.router, prefix="/api")
+app.include_router(strokes.router, prefix="/api")
 
 # No /api prefix: the socket lives at /ws/boards/{board_id}, outside the REST
 # surface, because it is a different protocol rather than another resource.

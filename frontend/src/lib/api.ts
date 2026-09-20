@@ -21,6 +21,9 @@ import type {
   NoteMove,
   NoteReorder,
   NoteResize,
+  StrokeCreate,
+  StrokeDelete,
+  StrokeReorder,
 } from "@/lib/types";
 import type { ApiErrorBody, ApiErrorCode } from "@/lib/types";
 
@@ -194,6 +197,33 @@ export const api = {
 
   deleteNote(noteId: string, payload: NoteDelete): Promise<MutationResult> {
     return request<MutationResult>(`/notes/${noteId}`, {
+      method: "DELETE",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /**
+   * Commit a finished stroke. Called once, on pointer release — the polyline
+   * travels over the socket as ephemeral `draw` frames while it is being
+   * drawn, and is never written down until the gesture ends. Mirrors why
+   * `moveNote` only fires on release rather than every frame.
+   */
+  createStroke(boardId: string, payload: StrokeCreate): Promise<MutationResult> {
+    return request<MutationResult>(`/boards/${boardId}/strokes`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  reorderStroke(strokeId: string, payload: StrokeReorder): Promise<MutationResult> {
+    return request<MutationResult>(`/strokes/${strokeId}/order`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteStroke(strokeId: string, payload: StrokeDelete): Promise<MutationResult> {
+    return request<MutationResult>(`/strokes/${strokeId}`, {
       method: "DELETE",
       body: JSON.stringify(payload),
     });

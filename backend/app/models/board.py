@@ -13,10 +13,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
-    # Import-time cycle: Note imports Board for its relationship. Only the
-    # type checker needs this name; SQLAlchemy resolves the string at mapper
-    # configuration time.
+    # Import-time cycle: Note/Stroke import Board for their relationship. Only
+    # the type checker needs these names; SQLAlchemy resolves the string at
+    # mapper configuration time.
     from app.models.note import Note
+    from app.models.stroke import Stroke
 
 
 class Board(Base):
@@ -43,6 +44,16 @@ class Board(Base):
     # gap is exactly the signal we use to mean "you missed an event".
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
 
+    # The shared stacking cursor for this board. Every "bring to front" - a new
+    # note, a new stroke, or an existing one of either being grabbed - reads and
+    # increments this ONE counter, which is what makes "the last thing you
+    # touched is on top" a true statement about the whole canvas rather than two
+    # objects types that each keep their own stack and happen to overlap. Never
+    # exposed to clients; it is purely how the server derives an authoritative
+    # z_index under the board lock. See docs/canvas.md section 2 and
+    # repositories/boards.py:bump_z_cursor.
+    z_cursor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -51,6 +62,11 @@ class Board(Base):
     )
 
     notes: Mapped[list[Note]] = relationship(
+        back_populates="board",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    strokes: Mapped[list[Stroke]] = relationship(
         back_populates="board",
         cascade="all, delete-orphan",
         passive_deletes=True,

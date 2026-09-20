@@ -19,10 +19,13 @@ import {
   initialBoardState,
   type BoardState,
   type OptimisticChange,
+  type StrokeChange,
 } from "@/lib/board/reducer";
 import { BoardSocket } from "@/lib/realtime/socket";
 import {
   DEFAULT_HEIGHT,
+  DEFAULT_STROKE_COLOR,
+  DEFAULT_STROKE_WIDTH,
   DEFAULT_WIDTH,
   type Actor,
   type ConnectionStatus,
@@ -31,6 +34,8 @@ import {
   type NoteTone,
   type PresenceMember,
   type ServerFrame,
+  type Stroke,
+  type StrokePoint,
   type VersionConflictDetails,
 } from "@/lib/types";
 
@@ -66,6 +71,21 @@ export interface RemoteCursor {
   at: number;
 }
 
+/**
+ * Somebody else's stroke as it is being drawn. Same rumour treatment as
+ * RemoteDrag: no revision, never persisted, gone the instant the gesture
+ * settles because the authoritative `stroke.created` event has landed by
+ * then. Keyed by the drawing client's own `stroke_id`, not a database id —
+ * that id does not exist yet.
+ */
+export interface RemoteStroke {
+  strokeId: string;
+  points: StrokePoint[];
+  color: string;
+  width: number;
+  actor: Actor;
+}
+
 /** A cursor nobody has moved for this long is stale and stops being drawn. */
 const CURSOR_TTL_MS = 8_000;
 
@@ -73,9 +93,13 @@ export interface UseBoardResult {
   state: BoardState;
   /** Notes in paint order, lowest z first. */
   notes: Note[];
+  /** Strokes in paint order, lowest z first. */
+  strokes: Stroke[];
   presence: PresenceMember[];
   connection: ConnectionStatus;
   remoteDrags: Record<string, RemoteDrag>;
+  /** Ephemeral: somebody else's stroke as it is being drawn, keyed by stroke_id. */
+  remoteStrokes: Record<string, RemoteStroke>;
   cursors: RemoteCursor[];
   lastSyncedAt: Date | null;
   resyncNotice: string | null;
@@ -101,10 +125,26 @@ export interface UseBoardResult {
   reorderNote: (note: Note, to: "front" | "back") => Promise<void>;
   deleteNote: (note: Note) => Promise<void>;
 
+  createStroke: (input: {
+    points: StrokePoint[];
+    color?: string;
+    width?: number;
+  }) => Promise<string | null>;
+  reorderStroke: (stroke: Stroke, to: "front" | "back") => Promise<void>;
+  deleteStroke: (stroke: Stroke) => Promise<void>;
+
   /** Ephemeral: tell everyone where a note is being carried right now. */
   sendDrag: (noteId: string, x: number, y: number, settled?: boolean) => void;
   /** Ephemeral: tell everyone where this cursor is, in world coordinates. */
   sendPointer: (x: number, y: number) => void;
+  /** Ephemeral: tell everyone what is being drawn right now, in world coords. */
+  sendDraw: (
+    strokeId: string,
+    points: StrokePoint[],
+    color: string,
+    width: number,
+    settled?: boolean,
+  ) => void;
   setEditing: (noteId: string | null) => void;
   resync: () => Promise<void>;
 }
@@ -115,6 +155,7 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
   const [presence, setPresence] = useState<PresenceMember[]>([]);
   const [connection, setConnection] = useState<ConnectionStatus>("connecting");
   const [remoteDrags, setRemoteDrags] = useState<Record<string, RemoteDrag>>({});
+  const [remoteStrokes, setRemoteStrokes] = useState<Record<string, RemoteStroke>>({});
   const [cursors, setCursors] = useState<RemoteCursor[]>([]);
   const [resyncNotice, setResyncNotice] = useState<string | null>(null);
 
@@ -141,6 +182,7 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
           type: "snapshotLoaded",
           board: snapshot.board,
           notes: snapshot.notes,
+          strokes: snapshot.strokes,
           revision: snapshot.revision,
         });
         setLastSyncedAt(new Date());
@@ -173,6 +215,7 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
           type: "snapshotLoaded",
           board: frame.board,
           notes: frame.notes,
+          strokes: frame.strokes,
           revision: frame.revision,
         });
         setLastSyncedAt(new Date());
@@ -244,6 +287,31 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
               noteId: frame.note_id,
               x: frame.x,
               y: frame.y,
+              actor: frame.actor,
+            },
+          };
+        });
+        break;
+      }
+
+      case "presence.draw": {
+        // A rumour about an in-progress stroke, exactly like presence.drag for
+        // notes: held until the gesture settles, at which point the
+        // authoritative `stroke.created` event has already landed.
+        setRemoteStrokes((current) => {
+          if (frame.settled) {
+            if (!(frame.stroke_id in current)) return current;
+            const next = { ...current };
+            delete next[frame.stroke_id];
+            return next;
+          }
+          return {
+            ...current,
+            [frame.stroke_id]: {
+              strokeId: frame.stroke_id,
+              points: frame.points,
+              color: frame.color,
+              width: frame.width,
               actor: frame.actor,
             },
           };
@@ -325,6 +393,14 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
       dispatch({ type: "optimisticApply", opId, change, tempNoteId });
       try {
         const result = await mutate(opId);
+        if (result.event === null) {
+          // The server succeeded and changed nothing - see MutationResult in
+          // lib/types.ts. No authoritative note is coming, so the optimistic
+          // guess must be undone here rather than left to be corrected by an
+          // event that will never arrive.
+          dispatch({ type: "opReverted", opId });
+          return result;
+        }
         dispatch({ type: "eventReceived", event: result.event });
         dispatch({ type: "opSettled", opId, tempNoteId });
         return result;
@@ -342,6 +418,44 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
           } else if (err.code === "note_gone") {
             void loadSnapshot("Resynced — a note you touched had already changed.");
           }
+        }
+        return null;
+      }
+    },
+    [loadSnapshot],
+  );
+
+  // Mirrors runMutation exactly, one level down: a separate function rather
+  // than a generic `runMutation<T>` over both entity kinds, because the two
+  // already diverge in their rollback state (pending vs strokePending,
+  // noteOverride has no stroke equivalent) and forcing them through one
+  // generic would just move that branching inside it instead of removing it.
+  const runStrokeMutation = useCallback(
+    async (
+      change: StrokeChange,
+      mutate: (opId: string) => Promise<MutationResult>,
+      tempStrokeId?: string,
+    ): Promise<MutationResult | null> => {
+      const opId = newOpId();
+      dispatch({ type: "strokeOptimisticApply", opId, change, tempStrokeId });
+      try {
+        const result = await mutate(opId);
+        if (result.event === null) {
+          dispatch({ type: "strokeOpReverted", opId });
+          return result;
+        }
+        dispatch({ type: "eventReceived", event: result.event });
+        dispatch({ type: "strokeOpSettled", opId, tempStrokeId });
+        return result;
+      } catch (err) {
+        dispatch({
+          type: "strokeOpFailed",
+          opId,
+          message: messageFor(err, "That change didn't go through."),
+        });
+
+        if (err instanceof ApiError && err.code === "stroke_gone") {
+          void loadSnapshot("Resynced — a stroke you touched had already changed.");
         }
         return null;
       }
@@ -394,7 +508,7 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
       // The REAL id, so the caller can open the editor on the note that will
       // still be there a moment from now. The optimistic placeholder is gone by
       // the time this resolves.
-      if (result === null) return null;
+      if (result === null || result.event === null) return null;
       return "note" in result.event ? result.event.note.id : null;
     },
     [actor, boardId, runMutation, state.notes],
@@ -462,6 +576,61 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
     [runMutation],
   );
 
+  const createStroke = useCallback<UseBoardResult["createStroke"]>(
+    async ({ points, color = DEFAULT_STROKE_COLOR, width = DEFAULT_STROKE_WIDTH }) => {
+      const tempId = `temp-${newOpId()}`;
+      const now = new Date().toISOString();
+      // Shares one stacking sequence with notes, so a fresh stroke has to
+      // clear the highest z_index across BOTH — a stroke drawn over a note
+      // must land above it, and vice versa.
+      const highest = Math.max(
+        Object.values(state.notes).reduce((max, n) => Math.max(max, n.z_index), 0),
+        Object.values(state.strokes).reduce((max, s) => Math.max(max, s.z_index), 0),
+      );
+      const optimistic: Stroke = {
+        id: tempId,
+        board_id: boardId,
+        points,
+        color,
+        width,
+        z_index: highest + 1,
+        version: 1,
+        author_name: actor.name,
+        created_at: now,
+        updated_at: now,
+      };
+
+      const result = await runStrokeMutation(
+        { kind: "upsert", stroke: optimistic },
+        (opId) => api.createStroke(boardId, { points, color, width, op_id: opId }),
+        tempId,
+      );
+
+      if (result === null || result.event === null) return null;
+      return "stroke" in result.event ? result.event.stroke.id : null;
+    },
+    [actor, boardId, runStrokeMutation, state.notes, state.strokes],
+  );
+
+  const reorderStroke = useCallback<UseBoardResult["reorderStroke"]>(
+    async (stroke, to) => {
+      // No optimistic z here either — same reasoning as reorderNote.
+      await runStrokeMutation({ kind: "upsert", stroke }, (opId) =>
+        api.reorderStroke(stroke.id, { to, op_id: opId }),
+      );
+    },
+    [runStrokeMutation],
+  );
+
+  const deleteStroke = useCallback<UseBoardResult["deleteStroke"]>(
+    async (stroke) => {
+      await runStrokeMutation({ kind: "delete", strokeId: stroke.id }, (opId) =>
+        api.deleteStroke(stroke.id, { op_id: opId }),
+      );
+    },
+    [runStrokeMutation],
+  );
+
   const sendDrag = useCallback<UseBoardResult["sendDrag"]>(
     (noteId, x, y, settled = false) => {
       socketRef.current?.send({ type: "drag", note_id: noteId, x, y, settled });
@@ -472,6 +641,20 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
   const sendPointer = useCallback<UseBoardResult["sendPointer"]>((x, y) => {
     socketRef.current?.send({ type: "pointer", x, y });
   }, []);
+
+  const sendDraw = useCallback<UseBoardResult["sendDraw"]>(
+    (strokeId, points, color, width, settled = false) => {
+      socketRef.current?.send({
+        type: "draw",
+        stroke_id: strokeId,
+        points,
+        color,
+        width,
+        settled,
+      });
+    },
+    [],
+  );
 
   const setEditing = useCallback((noteId: string | null) => {
     socketRef.current?.send({ type: "editing", note_id: noteId });
@@ -491,12 +674,22 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
     [state.notes],
   );
 
+  const strokes = useMemo(
+    () =>
+      Object.values(state.strokes).sort((a, b) =>
+        a.z_index !== b.z_index ? a.z_index - b.z_index : a.id < b.id ? -1 : 1,
+      ),
+    [state.strokes],
+  );
+
   return {
     state,
     notes,
+    strokes,
     presence,
     connection,
     remoteDrags,
+    remoteStrokes,
     cursors,
     lastSyncedAt,
     resyncNotice,
@@ -508,8 +701,12 @@ export function useBoard(boardId: string, actor: Actor): UseBoardResult {
     resizeNote,
     reorderNote,
     deleteNote,
+    createStroke,
+    reorderStroke,
+    deleteStroke,
     sendDrag,
     sendPointer,
+    sendDraw,
     setEditing,
     resync,
   };

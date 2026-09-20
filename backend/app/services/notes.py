@@ -102,9 +102,12 @@ async def create_note(
             details={"limit": limit},
         )
 
-    # A new note lands on top of whatever is already there. The client never
-    # picks a z-index; the server derives one from the board's current stack.
-    _, highest = await note_repo.z_bounds(session, board_id)
+    # A new note lands on top of EVERYTHING already there - notes and strokes
+    # alike. The client never picks a z-index; the server bumps the board's
+    # shared stacking cursor and uses that, so a freshly placed note always
+    # outranks whatever was drawn or dropped before it. See
+    # repositories/boards.py:bump_z_cursor.
+    z_index = await board_repo.bump_z_cursor(session, board)
 
     note = await note_repo.insert(
         session,
@@ -116,7 +119,7 @@ async def create_note(
         width=payload.width or DEFAULT_WIDTH,
         height=payload.height or DEFAULT_HEIGHT,
         rotation=payload.rotation,
-        z_index=highest + 1,
+        z_index=z_index,
         tone=payload.tone,
         author_name=actor.name,
     )
@@ -265,12 +268,41 @@ async def reorder_note(
     the board's current stack under the lock - the same reason the Kanban
     version never accepted an array index: the client's view is already stale
     by the time the request lands.
+
+    This is also how "grab a note and it comes to the front" is implemented:
+    the frontend calls this with `to="front"` the instant a note is grabbed,
+    not only from an explicit "bring to front" command. "Front" reads the
+    board's shared z-cursor (notes AND strokes), so it always outranks
+    everything on the canvas, not just other notes. "Back" stays local to
+    notes - there is no requirement that a note be tucked behind a drawing.
     """
     board, note = await _load_under_lock(session, note_id)
     from_z = note.z_index
 
-    lowest, highest = await note_repo.z_bounds(session, board.id)
-    target = highest + 1 if payload.to == "front" else lowest - 1
+    if payload.to == "front":
+        # Grabbing is what raises, so this endpoint is now called on every
+        # pointer-down - including the very common case of picking up the note
+        # that is already on top. Raising it again would be a write, a
+        # revision, and a broadcast telling every other client to restack
+        # something that did not move.
+        #
+        # The check is here, under the board lock, rather than in the client:
+        # only the server knows the current stack, and a client that guessed
+        # "I am already on top" from its own possibly-stale copy could skip a
+        # raise that was genuinely needed.
+        current_revision = board.revision
+        if await board_repo.topmost_object(session, board.id) == (note.z_index, note.id):
+            # Nothing was written, so end the transaction rather than commit
+            # one. The revision is read BEFORE this: a rollback expires every
+            # ORM instance, and reading an attribute afterwards would try to
+            # lazy-load it on a dead transaction.
+            await session.rollback()
+            return MutationResult(event=None, board_revision=current_revision)
+
+        target = await board_repo.bump_z_cursor(session, board)
+    else:
+        lowest, _ = await note_repo.z_bounds(session, board.id)
+        target = lowest - 1
 
     await note_repo.apply_z_index(session, note=note, z_index=target)
 

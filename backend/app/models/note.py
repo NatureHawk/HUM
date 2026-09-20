@@ -37,14 +37,23 @@ class NoteTone(enum.StrEnum):
     one accent, and letting every note pick an arbitrary hex is how a coherent
     surface turns into confetti. Stored as a varchar with a CHECK for the same
     reason the old column was - a PG enum is awkward to extend in a migration.
+
+    Four presets, curated from the existing HUM tokens rather than invented:
+    one highlighter (the accent - used deliberately, not as a default), and
+    three muted, paper-like fills that read as "a stack of real notes" instead
+    of "a hue wheel". `INK` (a near-black fill) existed in Milestone 3 and is
+    retired here - a corkboard of near-black notes is the exact flatness this
+    palette exists to fix. Migration 0003 reassigns any existing `ink` notes
+    to one of the three new fills rather than deleting them.
     """
 
     ACCENT = "accent"
     PAPER = "paper"
-    INK = "ink"
+    PEACH = "peach"
+    SKY = "sky"
 
 
-TONES: tuple[NoteTone, ...] = (NoteTone.ACCENT, NoteTone.PAPER, NoteTone.INK)
+TONES: tuple[NoteTone, ...] = (NoteTone.ACCENT, NoteTone.PAPER, NoteTone.PEACH, NoteTone.SKY)
 
 # World units. A note is created at this size and resized from there.
 DEFAULT_WIDTH = 240.0
@@ -66,7 +75,7 @@ class Note(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "tone IN ('accent', 'paper', 'ink')",
+            "tone IN ('accent', 'paper', 'peach', 'sky')",
             name="ck_notes_tone",
         ),
         # No lower bound: a note is created empty and typed into.

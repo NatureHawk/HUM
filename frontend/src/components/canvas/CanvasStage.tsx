@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { NoteObject } from "@/components/canvas/NoteObject";
 import { RemoteCursors } from "@/components/canvas/RemoteCursors";
+import { StrokeLayer } from "@/components/canvas/StrokeLayer";
 import {
   INITIAL_CAMERA,
   fitToNotes,
@@ -29,8 +30,18 @@ import {
   type Camera,
 } from "@/lib/canvas/camera";
 import { cn } from "@/lib/cn";
-import type { RemoteCursor, RemoteDrag } from "@/lib/board/useBoard";
-import { MAX_SIZE, MIN_SIZE, type Note } from "@/lib/types";
+import type { RemoteCursor, RemoteDrag, RemoteStroke } from "@/lib/board/useBoard";
+import {
+  DEFAULT_STROKE_COLOR,
+  DEFAULT_STROKE_WIDTH,
+  MAX_SIZE,
+  MAX_STROKE_POINTS,
+  MIN_SIZE,
+  type Note,
+  type NoteTone,
+  type Stroke,
+  type StrokePoint,
+} from "@/lib/types";
 
 /**
  * How often live positions go out over the socket while a gesture is running.
@@ -51,14 +62,25 @@ type Gesture =
       x: number;
       y: number;
     }
-  | { kind: "resize"; noteId: string; startW: number; startH: number; originX: number; originY: number };
+  | { kind: "resize"; noteId: string; startW: number; startH: number; originX: number; originY: number }
+  | { kind: "draw"; strokeId: string; points: StrokePoint[] };
+
+/**
+ * Notes and strokes are different object kinds sharing one selection slot —
+ * Delete/Backspace/Escape need to know WHICH kind without a note id and a
+ * stroke id ever being compared against each other by accident.
+ */
+type Selection = { kind: "note"; id: string } | { kind: "stroke"; id: string } | null;
 
 export interface CanvasStageProps {
   notes: Note[];
+  strokes: Stroke[];
   remoteDrags: Record<string, RemoteDrag>;
+  remoteStrokes: Record<string, RemoteStroke>;
   cursors: RemoteCursor[];
   selfActorId: string;
   editingByOthers: Map<string, string>;
+  tool: "select" | "pen";
   onCreateAt: (x: number, y: number) => void;
   /** A note that should open its own editor as soon as it appears. */
   autoEditId: string | null;
@@ -68,8 +90,27 @@ export interface CanvasStageProps {
   onDelete: (note: Note) => void;
   onReorder: (note: Note, to: "front" | "back") => void;
   onEditingChange: (noteId: string | null) => void;
+  onToneChange: (note: Note, tone: NoteTone) => void;
+  /**
+   * Every grab — a plain click as much as a drag start — bids for the front
+   * of the stack. The client never assigns a z-index itself; it asks the
+   * server to resolve "front" against whatever the live stack is, the same
+   * way an explicit reorder does. See docs/canvas.md's stacking discussion.
+   */
+  onGrabNote: (note: Note) => void;
+  onCreateStroke: (points: StrokePoint[]) => void;
+  onDeleteStroke: (stroke: Stroke) => void;
+  /** Selecting a stroke also bids it to the front, exactly like onGrabNote. */
+  onSelectStroke: (stroke: Stroke) => void;
   sendDrag: (noteId: string, x: number, y: number, settled?: boolean) => void;
   sendPointer: (x: number, y: number) => void;
+  sendDraw: (
+    strokeId: string,
+    points: StrokePoint[],
+    color: string,
+    width: number,
+    settled?: boolean,
+  ) => void;
   /** Lets the toolbar drive the camera without owning it. */
   onCameraReady: (controls: CameraControls) => void;
 }
@@ -84,10 +125,13 @@ export interface CameraControls {
 
 export function CanvasStage({
   notes,
+  strokes,
   remoteDrags,
+  remoteStrokes,
   cursors,
   selfActorId,
   editingByOthers,
+  tool,
   onCreateAt,
   autoEditId,
   onMove,
@@ -96,14 +140,20 @@ export function CanvasStage({
   onDelete,
   onReorder,
   onEditingChange,
+  onToneChange,
+  onGrabNote,
+  onCreateStroke,
+  onDeleteStroke,
+  onSelectStroke,
   sendDrag,
   sendPointer,
+  sendDraw,
   onCameraReady,
 }: CanvasStageProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [camera, setCamera] = useState<Camera>(INITIAL_CAMERA);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selection, setSelection] = useState<Selection>(null);
   const [gesture, setGesture] = useState<Gesture>({ kind: "none" });
   const [spaceHeld, setSpaceHeld] = useState(false);
 
@@ -214,33 +264,40 @@ export function CanvasStage({
       }
       if (isTyping(event.target)) return;
 
-      const selected = notes.find((n) => n.id === selectedId);
+      const selectedNote = selection?.kind === "note" ? notes.find((n) => n.id === selection.id) : undefined;
+      const selectedStroke =
+        selection?.kind === "stroke" ? strokes.find((s) => s.id === selection.id) : undefined;
 
-      if (event.key === "Escape") setSelectedId(null);
+      if (event.key === "Escape") setSelection(null);
 
-      if (selected && (event.key === "Delete" || event.key === "Backspace")) {
+      // Delete/Backspace works on whichever kind of object is selected.
+      if ((selectedNote || selectedStroke) && (event.key === "Delete" || event.key === "Backspace")) {
         event.preventDefault();
-        setSelectedId(null);
-        onDelete(selected);
+        setSelection(null);
+        if (selectedNote) onDelete(selectedNote);
+        else if (selectedStroke) onDeleteStroke(selectedStroke);
       }
 
-      if (selected && (event.key === "]" || (event.key === "ArrowUp" && event.shiftKey))) {
+      // Reorder and arrow-nudge stay note-only: a stroke has no z shortcut
+      // (selecting it already bids it to front) and no position to nudge —
+      // its points are the drawing, not a box that can be moved.
+      if (selectedNote && (event.key === "]" || (event.key === "ArrowUp" && event.shiftKey))) {
         event.preventDefault();
-        onReorder(selected, "front");
+        onReorder(selectedNote, "front");
       }
-      if (selected && (event.key === "[" || (event.key === "ArrowDown" && event.shiftKey))) {
+      if (selectedNote && (event.key === "[" || (event.key === "ArrowDown" && event.shiftKey))) {
         event.preventDefault();
-        onReorder(selected, "back");
+        onReorder(selectedNote, "back");
       }
 
       // Arrow keys nudge the selected note: the keyboard equivalent of a drag,
       // committed immediately since there is no gesture to stream.
-      if (selected && !event.shiftKey && event.key.startsWith("Arrow")) {
+      if (selectedNote && !event.shiftKey && event.key.startsWith("Arrow")) {
         event.preventDefault();
         const step = event.altKey ? 1 : 16;
         const dx = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
         const dy = event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0;
-        onMove(selected, selected.x + dx, selected.y + dy);
+        onMove(selectedNote, selectedNote.x + dx, selectedNote.y + dy);
       }
     }
 
@@ -254,7 +311,7 @@ export function CanvasStage({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [notes, onDelete, onMove, onReorder, selectedId]);
+  }, [notes, strokes, onDelete, onDeleteStroke, onMove, onReorder, selection]);
 
   // -- pointer -------------------------------------------------------------
 
@@ -270,7 +327,9 @@ export function CanvasStage({
 
   const handleStagePointerDown = useCallback(
     (event: React.PointerEvent) => {
-      // Middle mouse, or space-drag, or an empty-canvas drag: pan.
+      // Middle mouse, or space-drag, or an empty-canvas drag: pan. This check
+      // comes first regardless of tool, which is what keeps panning working
+      // in PEN mode via space-drag / middle mouse.
       const wantsPan = spaceHeld || event.button === 1;
       if (event.button !== 0 && !wantsPan) return;
 
@@ -279,20 +338,37 @@ export function CanvasStage({
         setGesture({ kind: "pan", lastX: event.clientX, lastY: event.clientY });
         return;
       }
+
+      if (tool === "pen") {
+        const world = pointerToWorld(event);
+        setGesture({ kind: "draw", strokeId: crypto.randomUUID(), points: [[world.x, world.y]] });
+        return;
+      }
+
       // Plain click on the background clears the selection.
-      setSelectedId(null);
+      setSelection(null);
       setGesture({ kind: "pan", lastX: event.clientX, lastY: event.clientY });
     },
-    [spaceHeld],
+    [pointerToWorld, spaceHeld, tool],
   );
 
   const handleNotePointerDown = useCallback(
     (event: React.PointerEvent, note: Note) => {
       if (spaceHeld || event.button !== 0) return;
+      // In PEN mode a note must not intercept the gesture: returning without
+      // stopping propagation lets the pointer-down bubble to the stage handler
+      // above, which starts a stroke — drawing over a note works exactly like
+      // drawing over open canvas.
+      if (tool === "pen") return;
       event.stopPropagation();
       (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
 
-      setSelectedId(note.id);
+      setSelection({ kind: "note", id: note.id });
+      // Every grab — click or drag — bids for front. No optimistic z-index
+      // here: the note is already lifted visually via the 10_000 zIndex
+      // below while the gesture runs, so there is nothing to flicker while
+      // this round-trips to the server.
+      onGrabNote(note);
       const world = pointerToWorld(event);
       setGesture({
         kind: "drag",
@@ -304,7 +380,21 @@ export function CanvasStage({
       });
       setDragPosition({ x: note.x, y: note.y });
     },
-    [pointerToWorld, spaceHeld],
+    [onGrabNote, pointerToWorld, spaceHeld, tool],
+  );
+
+  const handleStrokePointerDown = useCallback(
+    (event: React.PointerEvent, stroke: Stroke) => {
+      // Defensive: StrokeLayer already gates pointer-events to SELECT mode via
+      // CSS, but a stray event (e.g. a queued one from just before a tool
+      // switch) should not be able to select through it.
+      if (tool !== "select") return;
+      event.stopPropagation();
+      (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+      setSelection({ kind: "stroke", id: stroke.id });
+      onSelectStroke(stroke);
+    },
+    [onSelectStroke, tool],
   );
 
   const handleResizePointerDown = useCallback(
@@ -355,6 +445,17 @@ export function CanvasStage({
             h: clamp(gesture.startH + (world.y - gesture.originY), MIN_SIZE, MAX_SIZE),
           });
         }
+      } else if (gesture.kind === "draw") {
+        // The local path grows on EVERY pointer event — the person drawing
+        // must never wait on the network to see their own line. Only the
+        // OUTGOING frame is throttled, below.
+        if (gesture.points.length < MAX_STROKE_POINTS) {
+          const nextPoints: StrokePoint[] = [...gesture.points, [world.x, world.y]];
+          setGesture({ kind: "draw", strokeId: gesture.strokeId, points: nextPoints });
+          if (due) {
+            sendDraw(gesture.strokeId, nextPoints, DEFAULT_STROKE_COLOR, DEFAULT_STROKE_WIDTH);
+          }
+        }
       }
 
       if (due) {
@@ -362,7 +463,7 @@ export function CanvasStage({
         sendPointer(world.x, world.y);
       }
     },
-    [gesture, notes, pointerToWorld, sendDrag, sendPointer],
+    [gesture, notes, pointerToWorld, sendDraw, sendDrag, sendPointer],
   );
 
   const handlePointerUp = useCallback(() => {
@@ -385,15 +486,28 @@ export function CanvasStage({
       setResizePreview(null);
     }
 
+    if (gesture.kind === "draw") {
+      // A stray click is not a stroke: fewer than two points commits nothing.
+      if (gesture.points.length >= 2) {
+        onCreateStroke(gesture.points);
+      }
+      // Settle regardless of point count, so an observer who saw an earlier
+      // (unsettled) frame for this gesture drops the rumour either way.
+      sendDraw(gesture.strokeId, gesture.points, DEFAULT_STROKE_COLOR, DEFAULT_STROKE_WIDTH, true);
+    }
+
     setGesture({ kind: "none" });
-  }, [gesture, notes, onMove, onResize, resizePreview, sendDrag]);
+  }, [gesture, notes, onCreateStroke, onMove, onResize, resizePreview, sendDraw, sendDrag]);
 
   const handleDoubleClick = useCallback(
     (event: React.MouseEvent) => {
+      // PEN mode already owns double-click's pointer-down/up pair as two
+      // strokes (or one continued one); it must not also drop a note.
+      if (tool !== "select") return;
       const world = pointerToWorld(event);
       onCreateAt(world.x, world.y);
     },
-    [onCreateAt, pointerToWorld],
+    [onCreateAt, pointerToWorld, tool],
   );
 
   const panning = gesture.kind === "pan";
@@ -404,7 +518,11 @@ export function CanvasStage({
       data-testid="canvas"
       className={cn(
         "relative h-full w-full touch-none overflow-hidden select-none",
-        spaceHeld || panning ? "cursor-grabbing" : "cursor-default",
+        spaceHeld || panning
+          ? "cursor-grabbing"
+          : tool === "pen"
+            ? "cursor-crosshair"
+            : "cursor-default",
       )}
       style={
         {
@@ -458,7 +576,7 @@ export function CanvasStage({
             <NoteObject
               key={note.id}
               note={shown}
-              selected={selectedId === note.id}
+              selected={selection?.kind === "note" && selection.id === note.id}
               dragging={isDraggingThis}
               carriedBy={!isDraggingThis && remote ? remote.actor.name : null}
               editedBy={editingByOthers.get(note.id) ?? null}
@@ -469,9 +587,32 @@ export function CanvasStage({
               onResizePointerDown={handleResizePointerDown}
               onCommitText={onCommitText}
               onEditingChange={onEditingChange}
+              onToneChange={onToneChange}
             />
           );
         })}
+
+        {/*
+         * Strokes and notes share one z-index sequence server-side. StrokeLayer
+         * renders each stroke as its own positioned wrapper div (not a shared
+         * svg — see its header comment for why that doesn't interleave with
+         * NoteObject's divs), so the two genuinely interleave by z-index
+         * instead of strokes sitting in one flat layer above or below every
+         * note.
+         */}
+        <StrokeLayer
+          strokes={strokes}
+          remoteStrokes={remoteStrokes}
+          localStroke={
+            gesture.kind === "draw"
+              ? { points: gesture.points, color: DEFAULT_STROKE_COLOR, width: DEFAULT_STROKE_WIDTH }
+              : null
+          }
+          selectedStrokeId={selection?.kind === "stroke" ? selection.id : null}
+          tool={tool}
+          zoom={camera.zoom}
+          onStrokePointerDown={handleStrokePointerDown}
+        />
 
         <RemoteCursors cursors={cursors} selfActorId={selfActorId} zoom={camera.zoom} />
       </div>

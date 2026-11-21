@@ -26,6 +26,16 @@ Design rationale, with the alternatives that were rejected and why:
 [`docs/canvas.md`](docs/canvas.md), [`docs/canvas-polish.md`](docs/canvas-polish.md).
 To put it on the internet: [`docs/deployment.md`](docs/deployment.md).
 
+## Screenshots
+
+Two real browsers on one board, against the local stack (Postgres, Redis, two Chrome sessions).
+
+| Priyanshu's view, while Sam drags a note | Sam's view of the same moment |
+|---|---|
+| ![SyncBoard canvas from one browser while a collaborator drags a note; the note lifts and carries his name tag](docs/screenshots/canvas-live-drag.png) | ![The same board from the second browser: the moved note selected, the other person's live cursor arriving](docs/screenshots/canvas-second-browser.png) |
+
+The lift and the name tag on the dragged note are streamed over the WebSocket and never written to the database; only the drop is a durable move.
+
 ---
 
 ## Stack
